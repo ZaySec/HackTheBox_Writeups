@@ -1,0 +1,233 @@
+Type: #DFIR
+Level: `easy`
+
+>[!tldr] This easy Sherlock involves a sophisticated rootkit targeting Linux servers, causing persistent abnormal network traffic and hidden processes. Participants must analyze a memory dump to uncover the rootkit's stealth mechanisms, identify command and control infrastructure, and document all indicators of compromise.
+
+---
+## **Volatility Setup**
+
+1. Make sure #volatility is installed
+2. If you were given a `Ubuntu_6.8.0-87-generic.json` file.
+	1. Find where `symbols` are stored with 
+		- `python -c 'import volatility3, pathlib; print(pathlib.Path(volatility3.__file__).parent / "symbols")'`
+		- Output: `/usr/lib/python3.14/site-packages/volatility3/symbols`
+	2. Next, copy the `.json` into the proper directory
+		- `sudo cp <file>.json /usr/lib/python3.14/site-packages/volatility3/symbols/generic/vmcs/`
+		- Note: After putting in the path, click `TAB` to see if there is any place further down it should be copied to 
+3. It should be ready to go now 
+
+---
+## **Walkthrough**
+
+>[!hint] I use `vol -h` to find the right `Plugin`. I `ctrl + shift + F` and scan for keywords that the questions ask.
+
+>[!note] Learned Info
+>Rootkit Module: `singularity`
+>
+>Address in ProcFS: `0xffffc0b42640`
+>Module Address: `0xffffc0b42640`
+>Offset: `0xffffc0b42640`
+>
+>Tracepoint: `sched_process_fork`
+>Tracepoint Address: `0xffff961fbae0`
+>
+>Probe Address: `0xffffc0b3a990`
+>
+>IP Address: `192.168.200.177`
+
+
+
+1. Question: `What is the name of the hidden kernel module?`
+	
+```shell
+❯ vol -f dump_srv.mem linux.malware.hidden_modules.Hidden_modules
+<SNIP>
+
+Offset	Module Name	Code Size	Taints	Load Arguments	File Output
+0xffffc0b42640	singularity	0x19000	OOT_MODULE,UNSIGNED_MODULE		N/A
+```
+- As we can see there is one module. This is the flag
+	- Flag -> `singularity`
+
+
+2. Question: `What kernel taint flags are set for the rootkit module? (comma-separated, alphabetical order)`
+	
+```bash
+❯ vol -f dump_srv.mem linux.malware.modxview.Modxview
+<SNIP>
+
+Name	Address	In procfs	In sysfs	In scan	Taints
+singularity	0xffffc0b42640	False	False	True	OOT_MODULE,UNSIGNED_MODULE
+```
+- As we can see, the "Taints" is two modules, which is the flag!
+	- Flag -> `OOT_MODULE,UNSIGNED_MODULE`
+
+
+3. Question: `At what exact time (in seconds since boot) was the rootkit module loaded`
+	1. First I collected, the reference IDs such as Module Name and Address.
+		- `vol -f <file.mem> linux.malware.modxview.Modxview > Modxview.txt`
+		- This command uses volatility (`vol`) with a specified file (`-f`) and the module for modxview which is `linux.malware.modxview.Modxview`. 
+	2. I was testing different modules such as the `Kernal Log Buffer` (`linux.kmsg.Kmsg`) and many others which has anything mentioning, `module(s)`, `log(s)`, and so on. Once I had the output, I decided to use a `grep` one-liner which would search multiple terms across multiple files
+```shell
+❯ grep -E 'singularity|0xffffc0b3a990' *
+
+<SNIP>
+Kmsg.txt:kern	warn	2490.473832	Task(2669)	singularity: loading out-of-tree module taints kernel.
+<SNIP>
+```
+- Kmsg had two messages, a "loading" and "verification failed". The loading was logged at a time, which is the flag.
+	- Flag -> `2490.473832`
+
+
+4. Question: `What was the PID of the process that loaded the rootkit module?`
+	1. We used the output from above to find the PID. This is within the task parameter `Task(2669)`.
+		1. Flag -> `2669`
+
+
+5. Question: `Which kernel tracepoint is hooked by the rootkit`
+	1. I searched up `hook` in the `volatility` help page and found this module
+		- `linux.malware.check_syscall.Check_syscall` -> Check system call table for hooks.
+```shell
+❯ vol -f dump_srv.mem linux.malware.check_syscall.Check_syscall > Check_syscall.txt
+
+# nano into the file Check_syscall.txt
+tracepoint      tracepoint address      Probe   Probe address   Probe priority  Module  Module address
+
+sched_process_fork      0xffff961fbae0  -       0xffffc0b3a990  10      singularity     0xffffc0b42640
+```
+- As we can see above, we have the tracepoint `sched_process_fork` which is hooked to our rootkit module of `singularity`. So that is our flag!
+	- Flag -> `sched_process_fork`
+
+
+6. Question: `What is the IP address of the command and control server?`
+7. Question: `What port is the C2 server listening on?`
+	- Both Question 6 and 7 can be answered with the same output.
+	1. First, I searched in the `volatility` help function for "network" related modules, eventually finding:
+		- `linux.ip.Addr`: Lists network interface information for all devices
+		- `linux.sockstat.Sockstat`: Lists all network connections for all processes.
+	2. I then checked what our interface IPv4 addresss is
+```shell
+❯ vol -f dump_srv.mem linux.ip.Addr
+NetNS   Index   Interface       MAC     Promiscuous     IP      Prefix  Scope Type      State
+<SNIP>
+4026531840      2       ens33   00:0c:29:2b:0e:37       False   192.168.200.177 24      global  UP
+<SNIP>
+```
+- We now know our IP is: `192.168.200.177`
+	3. I then use the "sockstat" module to list all the connections for the processes. 
+		1. `vol -f dump_srv.mem linux.sockstat.Sockstat > sockstat.txt`
+		2. `nano sockstat` -> From here i search for our IP address which then shows this log
+			- `STREAM  TCP     192.168.200.177 48440   192.168.200.164 8081    ESTABLISHED`
+			- The TCP strem shows our IP address connecting to another host, `192.168.200.164:8081`. This is our C2 server.
+				- Flag #6 -> `192.168.200.164`
+				- Flag #7 -> `8081`
+
+
+8. Question: `What are the PIDs of the compromised bash processes connected to the C2 server? (comma-separated, ascending order)`
+	1. The `sockstat.txt` has a column for the "Process Name", we know it should be `bash` so I will `ctrl + f` and search for "bash". 
+		- 
+```shell
+bash    2693    2693    0       0x8e7a08d2ef00  AF_INET STREAM  TCP     192.168.200.177 48440   192.168.200.164 8081    ESTABLISHED     -
+
+bash    2693    2693    1       0x8e7a08d2ef00  AF_INET STREAM  TCP     192.168.200.177 48440   192.168.200.164 8081    ESTABLISHED     -
+
+bash    2693    2693    2       0x8e7a08d2ef00  AF_INET STREAM  TCP     192.168.200.177 48440   192.168.200.164 8081    ESTABLISHED     -
+
+bash    2695    2695    0       0x8e7a08d2dc80  AF_INET STREAM  TCP     192.168.200.177 48444   192.168.200.164 8081    ESTABLISHED     -
+
+bash    2695    2695    1       0x8e7a08d2dc80  AF_INET STREAM  TCP     192.168.200.177 48444   192.168.200.164 8081    ESTABLISHED     -
+
+bash    2695    2695    2       0x8e7a08d2dc80  AF_INET STREAM  TCP     192.168.200.177 48444   192.168.200.164 8081    ESTABLISHED     -
+
+bash    2698    2698    0       0x8e7a08d2ae40  AF_INET STREAM  TCP     192.168.200.177 48454   192.168.200.164 8081    ESTABLISHED     -
+
+bash    2698    2698    1       0x8e7a08d2ae40  AF_INET STREAM  TCP     192.168.200.177 48454   192.168.200.164 8081    ESTABLISHED     -
+
+bash    2698    2698    2       0x8e7a08d2ae40  AF_INET STREAM  TCP     192.168.200.177 48454   192.168.200.164 8081    ESTABLISHED     -
+```
+- Here we run into TCP stream establishing connection to the C2 server...
+	- As you can see these are the bash processes (and their IDs) who connected to the C2 server. Those process IDs are our flags
+		- Flag -> `2693,2695,2698`
+
+
+9. Question: `How many hooks has the rootkit installed?`
+	1. The module `linux.tracing.ftrace.CheckFtrace` shows `ftrace` hooking. 
+		- `Ftrace` is a `Function Tracer` and one of the most common uses of ftrace is the event tracing. 
+		- `vol -f dump_srv.mem linux.tracing.ftrace.CheckFtrace > CheckFtrace.txt` -> Lets then filter through the `CheckFtrace.txt` file.
+	2. We will use `grep` and a few filters to find out how many times our rootkit *module* `singularity` is connected to a `Hooked symbol`. 
+		- `1` -> 82 hooks, this is our flag
+			- Flag -> `82`
+
+
+10. Question: `Which function is hooked to hide IPv4 network connections?`
+	1. As i scanned through `CheckFtrace.txt` i noticed that some "Hooked symbols" are different than others. For example: `tcp4_seq_show` didn't have the prefix most others had of either `__x64` or `__ia32`. 
+	2. `tcp4_seq_show` also matched the description of a function. I found out this is the flag after submitting it
+		- Flag -> `tcp4_seq_show`
+
+
+11. Question: `How many variants of getdents syscalls are hooked?`
+	1. First, I `grep` through all my previous saved outputs with `getdents` as the search parameter. I get 3 notable files, one of them being `Check_syscall.txt` and `CheckFtrace.txt`
+	2. I then `grep` both of the output files, however, `Check_syscall.txt` doesn't have a column for "hooks". So, we would only need to group through `CheckFtrace.txt`
+		- `grep -E 'getdents' CheckFtrace.txt -c` -> `5` 
+		- This counts how many times our parameter was located, and that is our flag
+			- Flag -> `5`
+
+
+12. Question: `Which function is hooked to enable an ICMP-based covert channel?`
+	1. Knowing that `CheckFtrace.txt` has our hooked functions, I `grep` through with the new parameter of `icmp`
+```shell
+❯ grep -E 'icmp' CheckFtrace.txt
+0xffffc0b422c0	-	0xffffc0b3aac0	icmp_rcv	singularity	0xffffc0b35000
+```
+- Our only output shows us a function, `icmp_rcv` which is our flag.
+	- Flag -> `icmp_rcv`
+
+
+13. Question: `What is the memory address of the centralized callback function? (Format:0x************)`
+	1. To quickly identify where "Callback" functions are I will `grep` through all of my previous outputs with:
+		- `grep -E 'Callback' *` -> We learn that `CheckFtrace.txt` has a "Callback" column. This calls to a specific address each time, and thats the flag.
+			- Flag -> `0xffffc0b3aac0`
+
+
+14. Question: `What is the value of the suspicious environment variable which leads to the escalation of privileges?`
+	1. First, I used the module `linux.envars.Envars` to get the environmental variables
+		- `vol -f dump_srv.mem linux.envars.Envars > Envars.txt` 
+	2. Then I started enumerating different possible suspicious variable connections. 
+```shell
+1. I searched for the compromised bash processes, but none of the values were the flag.
+   
+❯ grep -E '2693|2695|2698' Envars.txt
+2693	1	bash	PWD	/
+2693	1	bash	HOME	/
+2693	1	bash	TERM	xterm-256color
+2693	1	bash	SHLVL	0
+2693	1	bash	PATH	/usr/bin:/bin:/usr/sbin:/sbin
+<SNIP>
+
+2. Next we need suspicious PID and PPIDs
+	- (WRONG) Compromised bash Processes: 2693|2695|2698
+	- (WRONG) Rootkit Module: 2669
+	- bash and sshd Processes: 1559|2702|2773|2774|2792|2799|2861
+	  
+❯ grep -E '1559|2702|2773|2774|2792|2799|2861' Envars.txt
+2774	2773	bash	USER	workstation
+2774	2773	bash	LOGNAME	workstation
+2774	2773	bash	HOME	/home/workstation
+2774	2773	bash	PATH	/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+2774	2773	bash	SHELL	/bin/bash
+2774	2773	bash	TERM	xterm-256color
+2774	2773	bash	XDG_SESSION_ID	10
+2774	2773	bash	XDG_RUNTIME_DIR	/run/user/1000
+2774	2773	bash	DBUS_SESSION_BUS_ADDRESS	unix:path=/run/user/1000/bus
+2774	2773	bash	XDG_SESSION_TYPE	tty
+2774	2773	bash	XDG_SESSION_CLASS	user
+2774	2773	bash	LANG	pt_PT.UTF-8
+2774	2773	bash	SSH_CLIENT	192.168.200.1 63600 22
+2774	2773	bash	SSH_CONNECTION	192.168.200.1 63600 192.168.200.177 22
+2774	2773	bash	SSH_TTY	/dev/pts/0
+2792	2774	bash	OPERATOR	access
+<SNIP>
+```
+- Here the variable `OPERATOR` is suspicious. So its associated "Value" and it was the flag
+	- Flag -> `access`
+
