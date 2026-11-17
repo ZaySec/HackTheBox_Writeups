@@ -1,0 +1,101 @@
+>[!tldr] In this easy digital forensics and incident response (DFIR) challenge, Forela-Security, a renowned consultancy, has presented you with a technical assessment to evaluate your proficiency in Windows Event Log Analysis. As a potential junior DFIR consultant, your task is to scrutinize, interpret, and report on the specific event logs they have provided. This scenario puts your understanding of Windows Event IDs, your ability to identify and interpret noteworthy security events, and your skills in effectively reporting your findings, to the test. This practical assessment mirrors real-world tasks you might face in a DFIR role, offering a realistic insight into the job while showcasing your abilities to Forela-Security.
+
+# `Timeline Explorer` Setup
+1. I used `evtxecmd` to convert several files from `evtx` -> `csv`
+2. The parsed files are all aggregated into one `parsed-evtx.csv` file
+```powershell
+PS C:\Users\Puter\Desktop\Tools\EvtxeCmd> .\EvtxECmd.exe -d "C:\Users\Puter\Downloads\Event-Logs" --csv "C:\Users\Puter\Downloads\Event-Logs" --csvf "C:\Users\Puter\Downloads\Event-Logs\parsed-evtx.csv"
+```
+
+# Task 1
+`When did the cyberjunkie user first successfully log into his computer? (UTC)`
+- `Event ID 4624`: An account was successfully logged on.
+1. Filter in `Timeline Explorer` for ID `4624` -> 67 lines
+2. We can then use the **Find** tool and search for "cyberjunkie" -> 4 lines
+3. We can then filter by "Time Created" and the answer is the oldest (thus first) login
+	1. **Answer:** `27/03/2023 14:37:09`
+
+>[!hint] Since we know the malicious user is cyberjunkie, we can filter for after the login date (`27/03/2023 14:37:09`) for this user's actions.
+# Task 2
+`The user tampered with firewall settings on the system. Analyze the firewall event logs to find out the Name of the firewall rule added?`
+1. Online you will find that adding a firewall is event id `4946`, so you have to specifically search for *Firewall Event IDs*. The following site is helpful, and I found ID `2004` -> 490 lines
+	- https://windows-forensic-reference.com/firewall_event_reference.html
+2. In `Timeline Explorer` filter for time after "cyberjunkie" first login -> 6 lines
+	1. Note: The time section switches month and day, most likely cause EU and American are different.
+	2. `27/03/2023 14:37:09`
+3. After viewing the couple payloads one really stuck out...
+	1. **Answer:** `Metasploit C2 Bypass`
+
+# Task 3
+`Whats the direction of the firewall rule?`
+1. If we look at the log `Metasploit C2 Bypass` we learn that it allows "Direction 2" which is `Outbound`
+	1. **Answer:** `Outbound`
+
+# Task 4
+`The user changed audit policy of the computer. Whats the Subcategory of this changed policy?`
+- `Event ID 4719`: This **event** is generated when the computer **audit** **policy** **changes**.
+1. We filter by ID `4719` -> 1 line
+2. Reading through we learn `SubcategoryGuid: 0cce9227-69ae-11d9-bed3-505054503030`. After a google search we learn its other name is `Other Object Access Events`.
+	1. **Answer:** `Other Object Access Events`
+
+# Task 5
+`The user "cyberjunkie" created a scheduled task. Whats the name of this task?`
+- `Event ID 4698` A scheduled task was created
+1. Filter by ID `4698` -> 1 line
+2. We learn the "TaskName" is `HTB-AUTOMATION`
+	1. **Answer:** `HTB-AUTOMATION`
+
+# Task 6
+`Whats the full path of the file which was scheduled for the task?`
+1. I grabbed all of the payload data from the line found in task 5
+```xml
+<SNIP>
+&lt;DisallowStartIfOnBatteries&gt;true&lt;/DisallowStartIfOnBatteries&gt;,     &lt;StopIfGoingOnBatteries&gt;true&lt;/StopIfGoingOnBatteries&gt;,     &lt;AllowHardTerminate&gt;true&lt;/AllowHardTerminate&gt;,     &lt;StartWhenAvailable&gt;false&lt;/StartWhenAvailable&gt;,     &lt;RunOnlyIfNetworkAvailable&gt;false&lt;/RunOnlyIfNetworkAvailable&gt;,     &lt;IdleSettings&gt;,       &lt;Duration&gt;PT10M&lt;/Duration&gt;,       &lt;WaitTimeout&gt;PT1H&lt;/WaitTimeout&gt;,       &lt;StopOnIdleEnd&gt;true&lt;/StopOnIdleEnd&gt;,       &lt;RestartOnIdle&gt;false&lt;/RestartOnIdle&gt;,     &lt;/IdleSettings&gt;,     &lt;AllowStartOnDemand&gt;true&lt;/AllowStartOnDemand&gt;,     &lt;Enabled&gt;true&lt;/Enabled&gt;,     &lt;Hidden&gt;false&lt;/Hidden&gt;,     &lt;RunOnlyIfIdle&gt;false&lt;/RunOnlyIfIdle&gt;,     &lt;WakeToRun&gt;false&lt;/WakeToRun&gt;,     &lt;ExecutionTimeLimit&gt;P3D&lt;/ExecutionTimeLimit&gt;,     &lt;Priority&gt;7&lt;/Priority&gt;,   &lt;/Settings&gt;,   &lt;Actions Context=\"Author\"&gt;,     &lt;Exec&gt;,       &lt;Command&gt;C:\\Users\\CyberJunkie\\Desktop\\Automation-HTB.ps1
+```
+2. I then put the data into notepad and filtered by `C:`, the only path found was `C:\\Users\\CyberJunkie\\Desktop\\Automation-HTB.ps1`
+	1. **Answer:** `C:\Users\CyberJunkie\Desktop\Automation-HTB.ps1`
+
+# Task 7
+`What are the arguments of the command?`
+1. Using the same payload data from before we can filter for "arguments" and find `-A cyberjunkie@hackthebox.eu`
+	1. **Answer:** `-A cyberjunkie@hackthebox.eu`
+
+# Task 8
+`The antivirus running on the system identified a threat and performed actions on it. Which tool was identified as malware by antivirus?`
+- Useful Link: https://windows-forensic-reference.com/defender_event_reference.html
+	- `Event ID 1117`: Action Taken on Malware
+1. Filter by ID `1117` -> 2 lines
+2. The first logs "Executable Info" holds most the data we need but the most important line is:
+	- `file:_C:\Users\CyberJunkie\Downloads\SharpHound-v1.1.0.zip-&gt;SharpHound.exe;`
+	- **Answer:** `Sharphound`
+
+# Task 9
+`Whats the full path of the malware which raised the alert?`
+1. From the previous answer, we have the "file" line, which also happens to give us the full path
+	- **Answer:** `C:\Users\CyberJunkie\Downloads\SharpHound-v1.1.0.zip`
+
+# Task 10
+`What action was taken by the antivirus?`
+- `Event ID 1117`: Action Taken on Malware
+1. Filter by ID `1117` 
+2. I had to open up the main "Payload" with all the xml info and filter by "action" and found "Action ID 2" also known as Quarantine 
+```xml
+{"@Name":"Path","#text":"file:_C:\\Users\\CyberJunkie\\AppData\\Local\\Temp\\msf.dll"},{"@Name":"Origin ID","#text":"1"},{"@Name":"Origin Name","#text":"Local machine"},{"@Name":"Execution ID","#text":"1"},{"@Name":"Execution Name","#text":"Suspended"},{"@Name":"Type ID","#text":"0"},{"@Name":"Type Name","#text":"Concrete"},{"@Name":"Pre Execution Status","#text":"0"},{"@Name":"Action ID","#text":"2"},{"@Name":"Action Name","#text":"Quarantine"},{"@Name":"Unused4"},{"@Name":"Error Code","#text":"0x00000000"},{"@Name":"Error Description","#text":"The operation completed successfully. "},{"@Name":"Unused5"},{"@Name":"Post Clean Status","#text":"0"}
+```
+- **Answer:** `Quarantine`
+
+# Task 11
+`The user used Powershell to execute commands. What command was executed by the user?`
+- `Event ID 400`: HostApplication field shows the exact command line that launched the PowerShell host — reveals whether PowerShell was launched directly, via cmd.exe, via a script, or by another process. Available even on systems with minimal PowerShell logging configured.
+1. Filter by ID `400` -> 3 lines
+2. The first and last line is "prompt" and the second/middle line reveals what cyberjunkie executed
+	1. **Answer:** `Get-FileHash -Algorithm md5 .\Desktop\Automation-HTB.ps1`
+
+# Task 12
+`We suspect the user deleted some event logs. Which Event log file was cleared?`
+- `Event ID 104`: “a log was cleared” + the **Channel** field
+1. Filter by ID `104` -> 15 lines
+2. There are two main logs cleared
+	1. `The Microsoft-Windows-Windows Firewall With Advanced Security/Firewall log file was cleared` 
+	2. `The Microsoft-Windows-Sysmon/Operational log file was cleared`
+- **Answer:** `The Microsoft-Windows-Windows Firewall With Advanced Security/Firewall log file was cleared` 
